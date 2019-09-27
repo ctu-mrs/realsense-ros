@@ -3,6 +3,7 @@
 
 #include "../include/realsense_node_factory.h"
 #include "../include/base_realsense_node.h"
+#include "../include/t265_realsense_node.h"
 #include <iostream>
 #include <map>
 #include <mutex>
@@ -18,14 +19,11 @@ constexpr auto realsense_ros_camera_version = REALSENSE_ROS_EMBEDDED_VERSION_STR
 
 PLUGINLIB_EXPORT_CLASS(realsense2_camera::RealSenseNodeFactory, nodelet::Nodelet)
 
-rs2::device _device;
-
 RealSenseNodeFactory::RealSenseNodeFactory()
 {
 	ROS_INFO("RealSense ROS v%s", REALSENSE_ROS_VERSION_STR);
 	ROS_INFO("Running with LibRealSense v%s", RS2_API_VERSION_STR);
 
-	signal(SIGINT, signalHandler);
 	auto severity = rs2_log_severity::RS2_LOG_SEVERITY_WARN;
 	tryGetLogSeverity(severity);
 	if (rs2_log_severity::RS2_LOG_SEVERITY_DEBUG == severity)
@@ -34,218 +32,202 @@ RealSenseNodeFactory::RealSenseNodeFactory()
 	rs2::log_to_console(severity);
 }
 
-void RealSenseNodeFactory::signalHandler(int signum)
+void RealSenseNodeFactory::closeDevice()
 {
-	ROS_INFO_STREAM(strsignal(signum) << " Signal is received! Terminating RealSense Node...");
     for(rs2::sensor sensor : _device.query_sensors())
 	{
 		sensor.stop();
 		sensor.close();
 	}
-	ros::shutdown();
-	exit(signum);
 }
 
-rs2::device RealSenseNodeFactory::getDevice(std::string& serial_no, bool shutdown_on_failure)
+RealSenseNodeFactory::~RealSenseNodeFactory()
 {
-	rs2::device retDev;
-	auto list = _ctx.query_devices();
-	if (0 == list.size())
-	{
-		ROS_ERROR("No RealSense devices were found!");
-	}
-	else
-	{
-		bool found = false;
-
-		for (auto&& dev : list)
-		{
-			auto sn = dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER);
-			ROS_DEBUG_STREAM("Device with serial number " << sn << " was found.");
-			if (serial_no.empty())
-			{
-				retDev = dev;
-				serial_no = sn;
-				found = true;
-				break;
-			}
-			else if (sn == serial_no)
-			{
-				retDev = dev;
-				found = true;
-				break;
-			}
-		}
-
-		if (!found)
-		{
-			ROS_ERROR_STREAM("The requested device with serial number " << serial_no << " is NOT found!");
-		}
-	}
-	if (!retDev && shutdown_on_failure)
-	{
-		ROS_ERROR("Terminating RealSense Node...");
-		ros::shutdown();
-		exit(1);
-	}
-	return retDev;
+	closeDevice();
 }
 
-void RealSenseNodeFactory::waitForDevice(rs2::device& dev)
+void RealSenseNodeFactory::getDevice(rs2::device_list list)
 {
-	std::mutex mtx;
-	std::condition_variable cv;
-	_ctx.set_devices_changed_callback([&dev, &cv](rs2::event_information& info)
+	if (!_device)
+	{
+		if (0 == list.size())
+		{
+			ROS_WARN("No RealSense devices were found!");
+		}
+		else
+		{
+			bool found = false;
+			for (auto&& dev : list)
 			{
-				if (info.was_removed(dev))
+				auto sn = dev.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER);
+				ROS_DEBUG_STREAM("Device with serial number " << sn << " was found.");
+				if (_serial_no.empty() || sn == _serial_no)
 				{
-					cv.notify_one();
+					_device = dev;
+					_serial_no = sn;
+					found = true;
+					break;
 				}
-			});
+			}
+			if (!found)
+			{
+				// T265 could be caught by another node.
+				ROS_ERROR_STREAM("The requested device with serial number " << _serial_no << " is NOT found. Will Try again.");
+			}
+		}
+	}
 
+	bool remove_tm2_handle(_device && RS_T265_PID != std::stoi(_device.get_info(RS2_CAMERA_INFO_PRODUCT_ID), 0, 16));
+	if (remove_tm2_handle)
 	{
-		std::unique_lock<std::mutex> lk(mtx);
-		cv.wait(lk);
+		_ctx.unload_tracking_module();
+	}
+
+	if (_device && _initial_reset)
+	{
+		_initial_reset = false;
+		try
+		{
+			ROS_INFO("Resetting device...");
+			_device.hardware_reset();
+			_device = rs2::device();
+			
+		}
+		catch(const std::exception& ex)
+		{
+			ROS_WARN_STREAM("An exception has been thrown: " << ex.what());
+		}
+	}
+}
+
+void RealSenseNodeFactory::change_device_callback(rs2::event_information& info)
+{
+	if (info.was_removed(_device))
+	{
+		ROS_ERROR("The device has been disconnected!");
+		_realSenseNode.reset(nullptr);
+		_device = rs2::device();
+	}
+	if (!_device)
+	{
+		rs2::device_list new_devices = info.get_new_devices();
+		if (new_devices.size() > 0)
+		{
+			ROS_INFO("Checking new devices...");
+			getDevice(new_devices);
+			if (_device)
+			{
+				StartDevice();
+			}
+		}
 	}
 }
 
 void RealSenseNodeFactory::onInit()
 {
-	try{
+	try
+	{
 #ifdef BPDEBUG
 		std::cout << "Attach to Process: " << getpid() << std::endl;
 		std::cout << "Press <ENTER> key to continue." << std::endl;
 		std::cin.get();
 #endif
-
-		auto nh = getNodeHandle();
+		ros::NodeHandle nh = getNodeHandle();
 		auto privateNh = getPrivateNodeHandle();
-		std::string serial_no("");
-		privateNh.param("serial_no", serial_no, std::string(""));
+		privateNh.param("serial_no", _serial_no, std::string(""));
 
 		std::string rosbag_filename("");
 		privateNh.param("rosbag_filename", rosbag_filename, std::string(""));
 		if (!rosbag_filename.empty())
 		{
-			ROS_INFO_STREAM("publish topics from rosbag file: " << rosbag_filename.c_str());
-			auto pipe = std::make_shared<rs2::pipeline>();
-			rs2::config cfg;
-			cfg.enable_device_from_file(rosbag_filename.c_str(), false);
-			cfg.enable_all_streams();
-			pipe->start(cfg); //File will be opened in read mode at this point
-			_device = pipe->get_active_profile().get_device();
-			_realSenseNode = std::unique_ptr<BaseRealSenseNode>(new BaseRealSenseNode(nh, privateNh, _device, serial_no));
+			{
+				ROS_INFO_STREAM("publish topics from rosbag file: " << rosbag_filename.c_str());
+				auto pipe = std::make_shared<rs2::pipeline>();
+				rs2::config cfg;
+				cfg.enable_device_from_file(rosbag_filename.c_str(), false);
+				cfg.enable_all_streams();
+				pipe->start(cfg); //File will be opened in read mode at this point
+				_device = pipe->get_active_profile().get_device();
+				_realSenseNode = std::unique_ptr<BaseRealSenseNode>(new BaseRealSenseNode(nh, privateNh, _device, _serial_no));
+			}
+			if (_device)
+			{
+				StartDevice();
+			}
 		}
 		else
 		{
-			bool enable_t265;
-			privateNh.param("enable_t265", enable_t265, false);
-			if (enable_t265)
-			{
-				// Currentlty need to wait before start quering device.
- 				_ctx.query_devices();
-				const double wait_time(10);
-				// std::this_thread::sleep_for(std::chrono::milliseconds(5000));
-				time_t start_time = time(NULL);
-				ROS_INFO_STREAM("Waiting for up to " << wait_time << "(sec) for T265 Device to load.");
-				int ms(200);
-				rs2::device dev;
-				while (difftime(time(NULL), start_time) < wait_time)
-				{
-					dev = getDevice(serial_no, false);
-					if (dev)
-					{
-						break;
-					}
-					std::this_thread::sleep_for(std::chrono::milliseconds(ms));
-				}
-				if (!dev)
-				{
-					ROS_ERROR("Timeout while waiting for T265 device. Terminating RealSense Node...");
-					ros::shutdown();
-					exit(1);
-				}
-				ROS_INFO_STREAM("T265 device found after " << difftime(time(NULL), start_time) << "(sec)");
-			}
-			bool initial_reset;
-			privateNh.param("initial_reset", initial_reset, false);
-			if (initial_reset)
-			{
-				ROS_INFO("Resetting device...");
-				rs2::device dev;
-				dev = getDevice(serial_no);
-				try
-				{
-					dev.hardware_reset();
-					waitForDevice(dev);
-				}
-				catch(const std::exception& ex)
-				{
-					ROS_WARN_STREAM("An exception has been thrown: " << ex.what());
-				}
-			}
-			_device = getDevice(serial_no);
-			if (!_device)
-			{
-				ros::shutdown();
-				exit(1);
-			}
+			privateNh.param("initial_reset", _initial_reset, false);
 
-			_ctx.set_devices_changed_callback([this](rs2::event_information& info)
-					{
-					if (info.was_removed(_device))
-					{
-					ROS_FATAL("The device has been disconnected! Terminating RealSense Node...");
-					ros::shutdown();
-					exit(1);
-					}
-					});
-
-			// TODO
-			auto pid_str = _device.get_info(RS2_CAMERA_INFO_PRODUCT_ID);
-			uint16_t pid;
-			std::stringstream ss;
-			ss << std::hex << pid_str;
-			ss >> pid;
-			switch(pid)
-			{
-			case SR300_PID:
-			case RS400_PID:
-			case RS405_PID:
-			case RS410_PID:
-			case RS460_PID:
-			case RS415_PID:
-			case RS420_PID:
-			case RS420_MM_PID:
-			case RS430_PID:
-			case RS430_MM_PID:
-			case RS430_MM_RGB_PID:
-			case RS435_RGB_PID:
-			case RS435i_RGB_PID:
-			case RS_USB2_PID:
-			case RS_T265_PID:
-				_realSenseNode = std::unique_ptr<BaseRealSenseNode>(new BaseRealSenseNode(nh, privateNh, _device, serial_no));
-				break;
-			default:
-				ROS_FATAL_STREAM("Unsupported device!" << " Product ID: 0x" << pid_str);
-				ros::shutdown();
-				exit(1);
-			}
+			_query_thread = std::thread([=]()
+						{
+							std::chrono::milliseconds timespan(6000);
+							while (!_device)
+							{
+								// _ctx.init_tracking_module(); // Unavailable function.
+								getDevice(_ctx.query_devices());
+								if (_device)
+								{
+									std::function<void(rs2::event_information&)> change_device_callback_function = [this](rs2::event_information& info){change_device_callback(info);};
+									_ctx.set_devices_changed_callback(change_device_callback_function);
+									StartDevice();
+								}
+								else
+								{
+									std::this_thread::sleep_for(timespan);
+								}
+							}
+						});
 		}
-		assert(_realSenseNode);
-		_realSenseNode->publishTopics();
-		_realSenseNode->registerDynamicReconfigCb(nh);
 	}
 	catch(const std::exception& ex)
 	{
 		ROS_ERROR_STREAM("An exception has been thrown: " << ex.what());
-		throw;
+		exit(1);
 	}
 	catch(...)
 	{
 		ROS_ERROR_STREAM("Unknown exception has occured!");
-		throw;
+		exit(1);
 	}
+}
+
+void RealSenseNodeFactory::StartDevice()
+{
+	ros::NodeHandle nh = getNodeHandle();
+	ros::NodeHandle privateNh = getPrivateNodeHandle();
+	// TODO
+	std::string pid_str(_device.get_info(RS2_CAMERA_INFO_PRODUCT_ID));
+	uint16_t pid = std::stoi(pid_str, 0, 16);
+	switch(pid)
+	{
+	case SR300_PID:
+	case SR300v2_PID:
+	case RS400_PID:
+	case RS405_PID:
+	case RS410_PID:
+	case RS460_PID:
+	case RS415_PID:
+	case RS420_PID:
+	case RS420_MM_PID:
+	case RS430_PID:
+	case RS430_MM_PID:
+	case RS430_MM_RGB_PID:
+	case RS435_RGB_PID:
+	case RS435i_RGB_PID:
+	case RS_USB2_PID:
+		_realSenseNode = std::unique_ptr<BaseRealSenseNode>(new BaseRealSenseNode(nh, privateNh, _device, _serial_no));
+		break;
+	case RS_T265_PID:
+		_realSenseNode = std::unique_ptr<T265RealsenseNode>(new T265RealsenseNode(nh, privateNh, _device, _serial_no));
+		break;
+	default:
+		ROS_FATAL_STREAM("Unsupported device!" << " Product ID: 0x" << pid_str);
+		ros::shutdown();
+		exit(1);
+	}
+	assert(_realSenseNode);
+	_realSenseNode->publishTopics();
 }
 
 void RealSenseNodeFactory::tryGetLogSeverity(rs2_log_severity& severity) const
