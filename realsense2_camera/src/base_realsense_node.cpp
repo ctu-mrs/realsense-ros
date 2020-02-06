@@ -173,13 +173,13 @@ void BaseRealSenseNode::publishTopics()
     getParameters();
     setupDevice();
     setupFilters();
-    registerDynamicReconfigCb(_node_handle);
+    registerDynamicReconfigCb(_pnh);
     setupErrorCallback();
     enable_devices();
     setupPublishers();
     setupStreams();
     SetBaseStream();
-    registerAutoExposureROIOptions(_node_handle);
+    registerAutoExposureROIOptions(_pnh);
     publishStaticTransforms();
     publishIntrinsics();
     startMonitoring();
@@ -748,7 +748,7 @@ void BaseRealSenseNode::setupDevice()
 void BaseRealSenseNode::setupPublishers()
 {
     ROS_INFO("setupPublishers...");
-    image_transport::ImageTransport image_transport(_node_handle);
+    image_transport::ImageTransport image_transport(_pnh);
 
     for (auto& stream : IMAGE_STREAMS)
     {
@@ -765,7 +765,7 @@ void BaseRealSenseNode::setupPublishers()
 
             std::shared_ptr<FrequencyDiagnostics> frequency_diagnostics(new FrequencyDiagnostics(_fps[stream], stream_name, _serial_no));
             _image_publishers[stream] = {image_transport.advertise(image_raw.str(), 1), frequency_diagnostics};
-            _info_publisher[stream] = _node_handle.advertise<sensor_msgs::CameraInfo>(camera_info.str(), 1);
+            _info_publisher[stream] = _pnh.advertise<sensor_msgs::CameraInfo>(camera_info.str(), 1);
 
             if (_align_depth && (stream != DEPTH) && stream.second < 2)
             {
@@ -776,12 +776,12 @@ void BaseRealSenseNode::setupPublishers()
                 std::string aligned_stream_name = "aligned_depth_to_" + stream_name;
                 std::shared_ptr<FrequencyDiagnostics> frequency_diagnostics(new FrequencyDiagnostics(_fps[stream], aligned_stream_name, _serial_no));
                 _depth_aligned_image_publishers[stream] = {image_transport.advertise(aligned_image_raw.str(), 1), frequency_diagnostics};
-                _depth_aligned_info_publisher[stream] = _node_handle.advertise<sensor_msgs::CameraInfo>(aligned_camera_info.str(), 1);
+                _depth_aligned_info_publisher[stream] = _pnh.advertise<sensor_msgs::CameraInfo>(aligned_camera_info.str(), 1);
             }
 
             if (stream == DEPTH && _pointcloud)
             {
-                _pointcloud_publisher = _node_handle.advertise<sensor_msgs::PointCloud2>("depth/color/points", 1);
+                _pointcloud_publisher = _pnh.advertise<sensor_msgs::PointCloud2>("depth/color/points", 1);
             }
         }
     }
@@ -790,49 +790,49 @@ void BaseRealSenseNode::setupPublishers()
     if (_imu_sync_method > imu_sync_method::NONE && _enable[GYRO] && _enable[ACCEL])
     {
         ROS_INFO("Start publisher IMU");
-        _synced_imu_publisher = std::make_shared<SyncedImuPublisher>(_node_handle.advertise<sensor_msgs::Imu>("imu", 1));
+        _synced_imu_publisher = std::make_shared<SyncedImuPublisher>(_pnh.advertise<sensor_msgs::Imu>("imu", 1));
         _synced_imu_publisher->Enable(_hold_back_imu_for_frames);
     }
     else
     {
         if (_enable[GYRO])
         {
-            _imu_publishers[GYRO] = _node_handle.advertise<sensor_msgs::Imu>("gyro/sample", 100);
+            _imu_publishers[GYRO] = _pnh.advertise<sensor_msgs::Imu>("gyro/sample", 100);
         }
 
         if (_enable[ACCEL])
         {
-            _imu_publishers[ACCEL] = _node_handle.advertise<sensor_msgs::Imu>("accel/sample", 100);
+            _imu_publishers[ACCEL] = _pnh.advertise<sensor_msgs::Imu>("accel/sample", 100);
         }
     }
     if (_enable[POSE])
     {
-        _imu_publishers[POSE] = _node_handle.advertise<nav_msgs::Odometry>("odom/sample", 100);
+        _imu_publishers[POSE] = _pnh.advertise<nav_msgs::Odometry>("odom/sample", 100);
     }
 
 
     if (_enable[FISHEYE] &&
         _enable[DEPTH])
     {
-        _depth_to_other_extrinsics_publishers[FISHEYE] = _node_handle.advertise<Extrinsics>("extrinsics/depth_to_fisheye", 1, true);
+        _depth_to_other_extrinsics_publishers[FISHEYE] = _pnh.advertise<Extrinsics>("extrinsics/depth_to_fisheye", 1, true);
     }
 
     if (_enable[COLOR] &&
         _enable[DEPTH])
     {
-        _depth_to_other_extrinsics_publishers[COLOR] = _node_handle.advertise<Extrinsics>("extrinsics/depth_to_color", 1, true);
+        _depth_to_other_extrinsics_publishers[COLOR] = _pnh.advertise<Extrinsics>("extrinsics/depth_to_color", 1, true);
     }
 
     if (_enable[INFRA1] &&
         _enable[DEPTH])
     {
-        _depth_to_other_extrinsics_publishers[INFRA1] = _node_handle.advertise<Extrinsics>("extrinsics/depth_to_infra1", 1, true);
+        _depth_to_other_extrinsics_publishers[INFRA1] = _pnh.advertise<Extrinsics>("extrinsics/depth_to_infra1", 1, true);
     }
 
     if (_enable[INFRA2] &&
         _enable[DEPTH])
     {
-        _depth_to_other_extrinsics_publishers[INFRA2] = _node_handle.advertise<Extrinsics>("extrinsics/depth_to_infra2", 1, true);
+        _depth_to_other_extrinsics_publishers[INFRA2] = _pnh.advertise<Extrinsics>("extrinsics/depth_to_infra2", 1, true);
     }
 }
 
@@ -1924,14 +1924,14 @@ void BaseRealSenseNode::publishIntrinsics()
 {
     if (_enable[GYRO])
     {
-        _info_publisher[GYRO] = _node_handle.advertise<IMUInfo>("gyro/imu_info", 1, true);
+        _info_publisher[GYRO] = _pnh.advertise<IMUInfo>("gyro/imu_info", 1, true);
         IMUInfo info_msg = getImuInfo(GYRO);
         _info_publisher[GYRO].publish(info_msg);
     }
 
     if (_enable[ACCEL])
     {
-        _info_publisher[ACCEL] = _node_handle.advertise<IMUInfo>("accel/imu_info", 1, true);
+        _info_publisher[ACCEL] = _pnh.advertise<IMUInfo>("accel/imu_info", 1, true);
         IMUInfo info_msg = getImuInfo(ACCEL);
         _info_publisher[ACCEL].publish(info_msg);
     }
