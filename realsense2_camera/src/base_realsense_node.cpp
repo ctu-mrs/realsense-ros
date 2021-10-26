@@ -975,12 +975,9 @@ void BaseRealSenseNode::setupPublishers()
         if (_enable[stream])
         {
             std::stringstream image_raw, camera_info;
-            bool rectified_image = false;
-            if (stream == DEPTH || stream == CONFIDENCE || stream == INFRA1 || stream == INFRA2)
-                rectified_image = true;
 
             std::string stream_name(STREAM_NAME(stream));
-            image_raw << stream_name << "/image_" << ((rectified_image)?"rect_":"") << "raw";
+            image_raw << stream_name << "/image_raw";
             camera_info << stream_name << "/camera_info";
 
             std::shared_ptr<FrequencyDiagnostics> frequency_diagnostics(new FrequencyDiagnostics(_fps[stream], stream_name, _serial_no));
