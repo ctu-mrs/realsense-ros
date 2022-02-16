@@ -2,15 +2,21 @@ cmake_minimum_required(VERSION 2.8.3)
 project(realsense2_description)
 
 find_package(catkin REQUIRED COMPONENTS
-    )
+  )
 
 # RealSense description
 catkin_package(
-    )
+  )
 
 # Install files
 install(DIRECTORY launch meshes rviz urdf
-  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+  )
+
+install(DIRECTORY ./
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+  FILES_MATCHING PATTERN "*.xml"
+  )
 
 # Tests
 if (CATKIN_ENABLE_TESTING)
