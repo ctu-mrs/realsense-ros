@@ -213,5 +213,10 @@
     <param name="initial_reset"            type="bool"   value="$(arg initial_reset)"/>
     <param name="unite_imu_method"         type="str"    value="$(arg unite_imu_method)"/>
 
+    <remap from="stereo_module/set_parameters" to="~stereo_module/set_parameters" />
+    <remap from="rgb_camera/set_parameters" to="~rgb_camera/set_parameters" />
+    <remap from="action_module/set_parameters" to="~action_module/set_parameters" />
+    <remap from="enable" to="~enable" />
+
   </node>
 </launch>
