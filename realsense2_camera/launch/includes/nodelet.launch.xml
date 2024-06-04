@@ -215,7 +215,7 @@
 
     <remap from="stereo_module/set_parameters" to="~stereo_module/set_parameters" />
     <remap from="rgb_camera/set_parameters" to="~rgb_camera/set_parameters" />
-    <remap from="action_module/set_parameters" to="~action_module/set_parameters" />
+    <remap from="motion_module/set_parameters" to="~motion_module/set_parameters" />
     <remap from="enable" to="~enable" />
 
   </node>
